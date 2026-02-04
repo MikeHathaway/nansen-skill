@@ -38,12 +38,19 @@ export interface SmartMoneyNetflow {
   chain: Chain;
   netflow: number;
   netflowUsd: number;
+  netflow1h?: number;
+  netflow7d?: number;
+  netflow30d?: number;
   inflow: number;
   inflowUsd: number;
   outflow: number;
   outflowUsd: number;
   buyersCount: number;
   sellersCount: number;
+  traderCount: number;
+  marketCap?: number;
+  tokenAge?: number;
+  sectors?: string[];
   timestamp: string;
 }
 
@@ -160,12 +167,12 @@ export interface OpportunitySignal {
 // API Request Types
 
 export interface SmartMoneyRequest {
-  chain: Chain;
+  chain?: Chain;
+  chains?: Chain[];
   token?: string;
   direction?: FlowDirection;
   minValue?: number;
   limit?: number;
-  timeframe?: Timeframe;
 }
 
 export interface TokenScreenerRequest {

@@ -12,7 +12,9 @@
       "Bash(NANSEN_API_KEY=test_key node dist/index.js:*)",
       "Bash(tree:*)",
       "Bash(git add:*)",
-      "Bash(NANSEN_API_KEY=test node dist/index.js:*)"
+      "Bash(NANSEN_API_KEY=test node dist/index.js:*)",
+      "Bash(npx ts-node:*)",
+      "Bash(npm run test:api:*)"
     ]
   }
 }

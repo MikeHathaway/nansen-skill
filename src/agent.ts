@@ -10,11 +10,9 @@ import type {
   ScanMode,
   OpportunitySignal,
   SmartMoneyRequest,
-  TokenScreenerRequest,
-  DexTradesRequest,
-  FlowsRequest,
   OpportunityScanRequest,
 } from './types.js';
+import type { TokenRequest, AddressRequest } from './api.js';
 
 export interface FindOpportunitiesOptions {
   chains?: Chain[];
@@ -169,12 +167,18 @@ export class NansenAgent {
     });
   }
 
-  // Convenience methods
+  // Convenience methods - API
   async getSmartMoneyNetflow(params: SmartMoneyRequest) { return this.api.getSmartMoneyNetflow(params); }
-  async screenTokens(params: TokenScreenerRequest) { return this.api.screenTokens(params); }
-  async getDexTrades(params: DexTradesRequest) { return this.api.getDexTrades(params); }
-  async getFlows(params: FlowsRequest) { return this.api.getFlows(params); }
+  async getSmartMoneyHoldings(params: SmartMoneyRequest) { return this.api.getSmartMoneyHoldings(params); }
+  async getSmartMoneyDexTrades(params: SmartMoneyRequest) { return this.api.getSmartMoneyDexTrades(params); }
+  async getTokenHolders(params: TokenRequest) { return this.api.getTokenHolders(params); }
+  async getTokenFlows(params: TokenRequest) { return this.api.getTokenFlows(params); }
+  async getTokenDexTrades(params: TokenRequest) { return this.api.getTokenDexTrades(params); }
+  async getWalletBalances(params: AddressRequest) { return this.api.getWalletBalances(params); }
+  async getRelatedWallets(params: AddressRequest) { return this.api.getRelatedWallets(params); }
   async scan(params: OpportunityScanRequest) { return this.api.scanOpportunities(params); }
+
+  // Convenience methods - MCP
   async analyzeToken(token: string, chain: Chain) { return this.mcp.analyzeToken(token, chain); }
   async analyzeWallet(address: string) { return this.mcp.analyzeWallet(address); }
   async search(query: string) { return this.mcp.search(query); }

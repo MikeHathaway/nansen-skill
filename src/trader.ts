@@ -20,9 +20,8 @@ import type {
   ScanMode,
   OpportunitySignal,
   SmartMoneyNetflow,
-  TokenScreenerResult,
-  TokenInfo,
 } from './types.js';
+import type { SmartMoneyHolding } from './api.js';
 
 // =============================================================================
 // Types
@@ -277,10 +276,10 @@ export class NansenTrader {
   }
 
   /**
-   * Screen tokens with caching
+   * Get smart money holdings with caching
    */
-  async screenTokens(chain: Chain, smartMoneyOnly: boolean = true): Promise<TokenScreenerResult[]> {
-    const cacheKey = Cache.makeKey('screen', { chain, smartMoneyOnly });
+  async getHoldings(chain: Chain): Promise<SmartMoneyHolding[]> {
+    const cacheKey = Cache.makeKey('holdings', { chain });
 
     if (this.config.enableRateLimit !== false) {
       await this.rateLimiter.acquire();
@@ -288,16 +287,16 @@ export class NansenTrader {
 
     return this.cache.getOrFetch(
       cacheKey,
-      () => this.agent.api.screenTokens({ chain, onlySmartMoney: smartMoneyOnly }),
+      () => this.agent.api.getSmartMoneyHoldings({ chain }),
       CACHE_TTL.TOKEN_SCREEN
-    ) as Promise<TokenScreenerResult[]>;
+    ) as Promise<SmartMoneyHolding[]>;
   }
 
   /**
    * Analyze a specific token (MCP + API combined)
    */
   async analyzeToken(token: string, chain: Chain): Promise<{
-    apiData: TokenInfo | null;
+    apiData: unknown;
     mcpData: unknown;
     recommendation: 'buy' | 'watch' | 'avoid';
     confidence: number;
@@ -312,7 +311,7 @@ export class NansenTrader {
     const [apiResult, mcpResult] = await Promise.allSettled([
       this.cache.getOrFetch(
         `token:${token}:${chain}`,
-        () => this.agent.api.getTokenInfo({ address: token, chain }),
+        () => this.agent.api.getTokenAnalysis({ chain, tokenAddress: token }),
         CACHE_TTL.TOKEN_INFO
       ),
       this.cache.getOrFetch(
@@ -322,7 +321,7 @@ export class NansenTrader {
       ),
     ]);
 
-    const apiData = apiResult.status === 'fulfilled' ? apiResult.value as TokenInfo : null;
+    const apiData = apiResult.status === 'fulfilled' ? apiResult.value : null;
     const mcpData = mcpResult.status === 'fulfilled' ? mcpResult.value : null;
 
     // Simple recommendation logic based on available data
@@ -330,17 +329,20 @@ export class NansenTrader {
     let confidence = 0.5;
     let reasoning = 'Insufficient data for strong recommendation';
 
-    // Use screener data for better metrics if available
-    if (apiData) {
-      // TokenInfo doesn't have smartMoneyNetflow directly, use volume as proxy
-      if (apiData.volume24h > 100000 && apiData.holders > 500) {
-        recommendation = 'buy';
-        confidence = 0.6;
-        reasoning = `High volume ($${formatNumber(apiData.volume24h)}) with ${apiData.holders} holders`;
-      } else if (apiData.liquidity < 10000) {
-        recommendation = 'avoid';
-        confidence = 0.7;
-        reasoning = `Low liquidity ($${formatNumber(apiData.liquidity)})`;
+    // Use holder data for basic analysis
+    if (apiData && typeof apiData === 'object' && 'holders' in apiData) {
+      const holders = (apiData as any).holders;
+      if (holders && holders.length > 0) {
+        const topHolderPercent = holders[0]?.ownershipPercent || 0;
+        if (topHolderPercent > 50) {
+          recommendation = 'avoid';
+          confidence = 0.7;
+          reasoning = `Concentrated ownership (top holder: ${topHolderPercent.toFixed(1)}%)`;
+        } else if (holders.length >= 5) {
+          recommendation = 'watch';
+          confidence = 0.6;
+          reasoning = `Distributed ownership with ${holders.length}+ tracked holders`;
+        }
       }
     }
 

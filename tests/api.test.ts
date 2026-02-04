@@ -30,23 +30,21 @@ describe('NansenClient', () => {
   });
 
   describe('getSmartMoneyNetflow', () => {
-    it('should fetch smart money data', async () => {
+    it('should fetch and normalize smart money data', async () => {
+      // Raw API response format
       const mockData = {
         data: [
           {
-            token: '0x123',
-            symbol: 'TEST',
-            name: 'Test Token',
-            chain: 'ethereum',
-            netflow: 1000,
-            netflowUsd: 50000,
-            inflow: 2000,
-            inflowUsd: 100000,
-            outflow: 1000,
-            outflowUsd: 50000,
-            buyersCount: 10,
-            sellersCount: 5,
-            timestamp: '2024-01-01T00:00:00Z',
+            token_address: '0x123',
+            token_symbol: 'TEST',
+            chain: 'base',
+            net_flow_1h_usd: 1000,
+            net_flow_24h_usd: 50000,
+            net_flow_7d_usd: 100000,
+            net_flow_30d_usd: 200000,
+            trader_count: 10,
+            token_age_days: 30,
+            market_cap_usd: 5000000,
           },
         ],
       };
@@ -57,26 +55,32 @@ describe('NansenClient', () => {
       });
 
       const client = new NansenClient();
-      const result = await client.getSmartMoneyNetflow({ chain: 'ethereum' });
+      const result = await client.getSmartMoneyNetflow({ chain: 'base' });
 
       expect(result).toHaveLength(1);
+      // Check normalization
+      expect(result[0].token).toBe('0x123');
       expect(result[0].symbol).toBe('TEST');
+      expect(result[0].netflowUsd).toBe(50000);
+      expect(result[0].netflow7d).toBe(100000);
+      expect(result[0].traderCount).toBe(10);
+      expect(result[0].marketCap).toBe(5000000);
+
+      // Check API call uses chains array
       expect(mockFetch).toHaveBeenCalledWith(
         'https://api.nansen.ai/api/v1/smart-money/netflow',
         expect.objectContaining({
           method: 'POST',
-          headers: expect.objectContaining({
-            apiKey: 'test-api-key',
-          }),
+          body: JSON.stringify({ chains: ['base'] }),
         })
       );
     });
 
-    it('should filter by direction', async () => {
+    it('should filter by direction=inflow', async () => {
       const mockData = {
         data: [
-          { token: '0x1', netflow: 100, netflowUsd: 5000 },
-          { token: '0x2', netflow: -50, netflowUsd: -2500 },
+          { token_address: '0x1', token_symbol: 'A', chain: 'base', net_flow_24h_usd: 100, trader_count: 1 },
+          { token_address: '0x2', token_symbol: 'B', chain: 'base', net_flow_24h_usd: -50, trader_count: 1 },
         ],
       };
 
@@ -87,7 +91,7 @@ describe('NansenClient', () => {
 
       const client = new NansenClient();
       const result = await client.getSmartMoneyNetflow({
-        chain: 'ethereum',
+        chain: 'base',
         direction: 'inflow',
       });
 
@@ -95,11 +99,11 @@ describe('NansenClient', () => {
       expect(result[0].netflow).toBeGreaterThan(0);
     });
 
-    it('should filter by minimum value', async () => {
+    it('should filter by direction=outflow', async () => {
       const mockData = {
         data: [
-          { token: '0x1', netflowUsd: 100000 },
-          { token: '0x2', netflowUsd: 5000 },
+          { token_address: '0x1', token_symbol: 'A', chain: 'base', net_flow_24h_usd: 100, trader_count: 1 },
+          { token_address: '0x2', token_symbol: 'B', chain: 'base', net_flow_24h_usd: -50, trader_count: 1 },
         ],
       };
 
@@ -110,24 +114,74 @@ describe('NansenClient', () => {
 
       const client = new NansenClient();
       const result = await client.getSmartMoneyNetflow({
-        chain: 'ethereum',
+        chain: 'base',
+        direction: 'outflow',
+      });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].netflow).toBeLessThan(0);
+    });
+
+    it('should filter by minimum value', async () => {
+      const mockData = {
+        data: [
+          { token_address: '0x1', token_symbol: 'A', chain: 'base', net_flow_24h_usd: 100000, trader_count: 1 },
+          { token_address: '0x2', token_symbol: 'B', chain: 'base', net_flow_24h_usd: 5000, trader_count: 1 },
+        ],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockData),
+      });
+
+      const client = new NansenClient();
+      const result = await client.getSmartMoneyNetflow({
+        chain: 'base',
         minValue: 50000,
       });
 
       expect(result).toHaveLength(1);
       expect(result[0].netflowUsd).toBe(100000);
     });
+
+    it('should apply limit', async () => {
+      const mockData = {
+        data: [
+          { token_address: '0x1', token_symbol: 'A', chain: 'base', net_flow_24h_usd: 100, trader_count: 1 },
+          { token_address: '0x2', token_symbol: 'B', chain: 'base', net_flow_24h_usd: 200, trader_count: 1 },
+          { token_address: '0x3', token_symbol: 'C', chain: 'base', net_flow_24h_usd: 300, trader_count: 1 },
+        ],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockData),
+      });
+
+      const client = new NansenClient();
+      const result = await client.getSmartMoneyNetflow({
+        chain: 'base',
+        limit: 2,
+      });
+
+      expect(result).toHaveLength(2);
+    });
   });
 
-  describe('screenTokens', () => {
-    it('should screen tokens with filters', async () => {
+  describe('new endpoints', () => {
+    it('getSmartMoneyHoldings should fetch holdings data', async () => {
       const mockData = {
         data: [
           {
-            token: '0x123',
-            symbol: 'TEST',
-            marketCap: 1000000,
-            smartMoneyNetflow: 50000,
+            token_address: '0x123',
+            token_symbol: 'TEST',
+            chain: 'base',
+            holder_count: 50,
+            total_balance_usd: 1000000,
+            balance_change_24h_usd: 50000,
+            balance_change_7d_usd: 100000,
+            market_cap_usd: 5000000,
           },
         ],
       };
@@ -138,14 +192,71 @@ describe('NansenClient', () => {
       });
 
       const client = new NansenClient();
-      const result = await client.screenTokens({
-        chain: 'base',
-        onlySmartMoney: true,
-        minMcap: 100000,
-      });
+      const result = await client.getSmartMoneyHoldings({ chain: 'base' });
 
       expect(result).toHaveLength(1);
-      expect(result[0].symbol).toBe('TEST');
+      expect(result[0].token).toBe('0x123');
+      expect(result[0].holderCount).toBe(50);
+      expect(result[0].totalBalanceUsd).toBe(1000000);
+    });
+
+    it('getTokenHolders should fetch token holders', async () => {
+      const mockData = {
+        data: [
+          {
+            address: '0xabc',
+            address_label: 'Whale',
+            token_amount: 1000000,
+            value_usd: 500000,
+            ownership_percentage: 0.05,
+            balance_change_24h: 1000,
+            balance_change_7d: 5000,
+            balance_change_30d: 10000,
+          },
+        ],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockData),
+      });
+
+      const client = new NansenClient();
+      const result = await client.getTokenHolders({ chain: 'base', tokenAddress: '0x123' });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].address).toBe('0xabc');
+      expect(result[0].label).toBe('Whale');
+      expect(result[0].ownershipPercent).toBe(5); // 0.05 * 100
+    });
+
+    it('getWalletBalances should fetch wallet balances', async () => {
+      const mockData = {
+        data: [
+          {
+            chain: 'ethereum',
+            address: '0x123',
+            token_address: '0xtoken',
+            token_symbol: 'ETH',
+            token_name: 'Ethereum',
+            token_amount: 10,
+            price_usd: 2000,
+            value_usd: 20000,
+          },
+        ],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockData),
+      });
+
+      const client = new NansenClient();
+      const result = await client.getWalletBalances({ address: '0x123', chain: 'ethereum' });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].symbol).toBe('ETH');
+      expect(result[0].valueUsd).toBe(20000);
     });
   });
 
@@ -162,7 +273,7 @@ describe('NansenClient', () => {
 
       const client = new NansenClient();
 
-      await expect(client.getSmartMoneyNetflow({ chain: 'ethereum' }))
+      await expect(client.getSmartMoneyNetflow({ chain: 'base' }))
         .rejects.toThrow(NansenApiError);
     });
 
@@ -176,7 +287,7 @@ describe('NansenClient', () => {
 
       const client = new NansenClient();
 
-      await expect(client.getSmartMoneyNetflow({ chain: 'ethereum' }))
+      await expect(client.getSmartMoneyNetflow({ chain: 'base' }))
         .rejects.toThrow(NansenApiError);
     });
   });
@@ -186,12 +297,13 @@ describe('NansenClient', () => {
       const mockData = {
         data: [
           {
-            token: '0x123',
-            symbol: 'ALPHA',
-            netflow: 50000,
-            netflowUsd: 100000,
-            buyersCount: 15,
-            sellersCount: 3,
+            token_address: '0x123',
+            token_symbol: 'ALPHA',
+            chain: 'base',
+            net_flow_24h_usd: 100000,
+            net_flow_7d_usd: 200000,
+            trader_count: 15,
+            market_cap_usd: 5000000,
           },
         ],
       };
@@ -203,13 +315,57 @@ describe('NansenClient', () => {
 
       const client = new NansenClient();
       const result = await client.scanOpportunities({
-        chain: 'ethereum',
+        chain: 'base',
         mode: 'accumulation',
       });
 
       expect(result).toHaveLength(1);
       expect(result[0].type).toBe('accumulation');
+      expect(result[0].token).toBe('0x123');
+      expect(result[0].symbol).toBe('ALPHA');
       expect(result[0].score).toBeGreaterThan(0);
+      expect(result[0].metrics.netflow24h).toBe(100000);
+    });
+
+    it('should scan for distribution signals', async () => {
+      const mockData = {
+        data: [
+          {
+            token_address: '0x456',
+            token_symbol: 'BETA',
+            chain: 'base',
+            net_flow_24h_usd: -75000,
+            net_flow_7d_usd: -150000,
+            trader_count: 10,
+          },
+        ],
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(mockData),
+      });
+
+      const client = new NansenClient();
+      const result = await client.scanOpportunities({
+        chain: 'base',
+        mode: 'distribution',
+      });
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('distribution');
+      expect(result[0].metrics.netflow24h).toBe(-75000);
+    });
+  });
+
+  describe('getSupportedChains', () => {
+    it('should return hardcoded chain list', () => {
+      const client = new NansenClient();
+      const chains = client.getSupportedChains();
+
+      expect(chains).toContain('ethereum');
+      expect(chains).toContain('base');
+      expect(chains).toContain('solana');
     });
   });
 });
