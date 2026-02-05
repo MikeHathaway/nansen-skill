@@ -1,10 +1,11 @@
 /**
- * NansenAgent - Unified interface combining Direct API + MCP
- * For autonomous trading agents
+ * NansenAgent - Unified interface for autonomous trading agents
+ * Uses NansenData for MCP-first architecture with API fallback
  */
 
-import { NansenClient, createClient } from './api.js';
-import { NansenMcp, createMcp } from './mcp.js';
+import { NansenData, createData } from './data.js';
+import type { NansenClient } from './api.js';
+import type { NansenMcp } from './mcp.js';
 import type {
   Chain,
   ScanMode,
@@ -30,17 +31,14 @@ export interface WatchOptions {
 }
 
 export class NansenAgent {
-  public readonly api: NansenClient;
-  public readonly mcp: NansenMcp;
+  public readonly data: NansenData;
+
+  // Expose underlying clients for backward compatibility
+  public get api(): NansenClient { return this.data.api; }
+  public get mcp(): NansenMcp { return this.data.mcp; }
 
   constructor(apiKey?: string) {
-    const key = apiKey || process.env.NANSEN_API_KEY;
-    if (!key) {
-      throw new Error('NANSEN_API_KEY is required');
-    }
-
-    this.api = createClient(key);
-    this.mcp = createMcp(key);
+    this.data = createData({ apiKey });
   }
 
   /**
@@ -61,11 +59,11 @@ export class NansenAgent {
 
     const allSignals: OpportunitySignal[] = [];
 
-    // Fast API scan
+    // Fast API scan via unified data layer
     for (const chain of chains) {
       for (const mode of modes) {
         try {
-          const signals = await this.api.scanOpportunities({ chain, mode, limit });
+          const signals = await this.data.scanOpportunities({ chain, mode, limit });
           allSignals.push(...signals.filter(s => s.score >= minScore));
         } catch (error) {
           console.error(`Scan error ${chain}/${mode}:`, (error as Error).message);
@@ -86,11 +84,11 @@ export class NansenAgent {
 
     const topSignals = uniqueSignals.slice(0, Math.max(analyzeTop, limit));
 
-    // MCP analysis for top signals
+    // MCP analysis for top signals via unified data layer
     if (analyzeTop > 0) {
       for (const signal of topSignals.slice(0, analyzeTop)) {
         try {
-          const analysis = await this.mcp.analyzeToken(signal.token, signal.chain);
+          const analysis = await this.data.getTokenInfo(signal.token, signal.chain);
           (signal as any).mcpAnalysis = analysis;
         } catch (error) {
           (signal as any).mcpAnalysis = { error: (error as Error).message };
@@ -122,7 +120,7 @@ export class NansenAgent {
       for (const chain of chains) {
         for (const mode of modes) {
           try {
-            const signals = await this.api.scanOpportunities({ chain, mode, limit: 50 });
+            const signals = await this.data.scanOpportunities({ chain, mode, limit: 50 });
 
             for (const signal of signals) {
               const value = signal.metrics.netflow24h || signal.metrics.amountUsd || 0;
@@ -167,21 +165,22 @@ export class NansenAgent {
     });
   }
 
-  // Convenience methods - API
-  async getSmartMoneyNetflow(params: SmartMoneyRequest) { return this.api.getSmartMoneyNetflow(params); }
-  async getSmartMoneyHoldings(params: SmartMoneyRequest) { return this.api.getSmartMoneyHoldings(params); }
-  async getSmartMoneyDexTrades(params: SmartMoneyRequest) { return this.api.getSmartMoneyDexTrades(params); }
-  async getTokenHolders(params: TokenRequest) { return this.api.getTokenHolders(params); }
-  async getTokenFlows(params: TokenRequest) { return this.api.getTokenFlows(params); }
-  async getTokenDexTrades(params: TokenRequest) { return this.api.getTokenDexTrades(params); }
-  async getWalletBalances(params: AddressRequest) { return this.api.getWalletBalances(params); }
-  async getRelatedWallets(params: AddressRequest) { return this.api.getRelatedWallets(params); }
-  async scan(params: OpportunityScanRequest) { return this.api.scanOpportunities(params); }
+  // Convenience methods - unified data layer (MCP-first with API fallback)
+  async getSmartMoneyNetflow(params: SmartMoneyRequest) { return this.data.getSmartMoneyNetflow(params); }
+  async getSmartMoneyHoldings(params: SmartMoneyRequest) { return this.data.getSmartMoneyHoldings(params); }
+  async getSmartMoneyDexTrades(params: SmartMoneyRequest) { return this.data.getSmartMoneyDexTrades(params); }
+  async getTokenHolders(token: string, chain: Chain, limit?: number) { return this.data.getTokenHolders(token, chain, limit); }
+  async getTokenFlows(token: string, chain: Chain) { return this.data.getTokenFlows(token, chain); }
+  async getTokenDexTrades(token: string, chain: Chain, options?: { onlySmartMoney?: boolean }) { return this.data.getTokenDexTrades(token, chain, options); }
+  async getWalletBalances(address: string, chain: Chain) { return this.data.getWalletBalances(address, chain); }
+  async getRelatedWallets(address: string, chain?: Chain) { return this.data.getRelatedWallets(address, chain); }
+  async scan(params: OpportunityScanRequest) { return this.data.scanOpportunities(params); }
 
-  // Convenience methods - MCP
-  async analyzeToken(token: string, chain: Chain) { return this.mcp.analyzeToken(token, chain); }
-  async analyzeWallet(address: string) { return this.mcp.analyzeWallet(address); }
-  async search(query: string) { return this.mcp.search(query); }
+  // MCP-specific methods
+  async analyzeToken(token: string, chain: Chain) { return this.data.getTokenInfo(token, chain); }
+  async analyzeWallet(address: string) { return this.data.getWalletProfile(address); }
+  async search(query: string) { return this.data.search(query); }
+  async screenTokens(chains: Chain[]) { return this.data.screenTokens(chains); }
 }
 
 export function createAgent(apiKey?: string): NansenAgent {

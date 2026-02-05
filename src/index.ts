@@ -4,9 +4,9 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import Table from 'cli-table3';
 import ora from 'ora';
-import { NansenClient, NansenApiError } from './api.js';
-import { NansenMcp, NansenMcpError, MCP_TOOLS, type McpTool } from './mcp.js';
-import { NansenAgent } from './agent.js';
+import { NansenData, createData } from './data.js';
+import { NansenApiError } from './api.js';
+import { NansenMcpError, MCP_TOOLS, type McpTool } from './mcp.js';
 import { NansenTrader, type TradingSignal } from './trader.js';
 import type {
   Chain,
@@ -16,12 +16,12 @@ import type {
 
 const program = new Command();
 
-let client: NansenClient;
+let dataClient: NansenData;
 
-function getClient(): NansenClient {
-  if (!client) {
+function getData(): NansenData {
+  if (!dataClient) {
     try {
-      client = new NansenClient();
+      dataClient = createData();
     } catch (error: any) {
       console.error(chalk.red(error.message));
       console.log('\nSet your API key:');
@@ -29,7 +29,7 @@ function getClient(): NansenClient {
       process.exit(1);
     }
   }
-  return client;
+  return dataClient;
 }
 
 function formatNumber(num: number): string {
@@ -66,30 +66,30 @@ program
 
 program
   .command('hot <chain>')
-  .description('Top tokens by smart money flow on a chain')
+  .description('Top tokens by smart money flow (MCP: token_discovery_screener)')
   .option('-l, --limit <n>', 'Number of results', parseInt, 10)
   .option('--pretty', 'Pretty print output')
   .action(async (chain: Chain, options) => {
     try {
-      const netflow = await getClient().getSmartMoneyNetflow({
-        chain,
-        direction: 'inflow',
-        limit: options.limit,
-      });
+      // MCP-first: uses token_discovery_screener (more comprehensive)
+      const tokens = await getData().screenTokens([chain]);
 
       const result = {
         chain,
         timestamp: new Date().toISOString(),
-        count: netflow.length,
-        hotTokens: netflow.map(t => ({
-          token: t.token,
+        source: 'mcp:token_discovery_screener',
+        count: Math.min(tokens.length, options.limit),
+        hotTokens: tokens.slice(0, options.limit).map(t => ({
+          address: t.address,
           symbol: t.symbol,
-          netflowUsd: t.netflowUsd,
-          netflow7d: t.netflow7d,
-          traderCount: t.traderCount,
+          name: t.name,
+          price: t.price,
+          priceChange24h: t.priceChange24h,
+          volume24h: t.volume24h,
           marketCap: t.marketCap,
-          signal: t.netflow > 0 && t.netflow7d && t.netflow7d > 0 ? 'strong_accumulation' :
-                  t.netflow > 0 ? 'accumulation' : 'mixed',
+          netflowUsd: t.netflowUsd,
+          smartMoneyFlow: t.smartMoneyFlow,
+          holders: t.holders,
         })),
       };
 
@@ -102,40 +102,31 @@ program
 
 program
   .command('token <address>')
-  .description('Token summary: holders, flows, trades')
+  .description('Token summary: holders, flows, trades (MCP-first with API fallback)')
   .requiredOption('-c, --chain <chain>', 'Chain (ethereum, base, arbitrum, etc.)')
   .option('--pretty', 'Pretty print output')
   .action(async (address: string, options) => {
     try {
-      const analysis = await getClient().getTokenAnalysis({
-        chain: options.chain as Chain,
-        tokenAddress: address,
-      });
+      // MCP-first: uses multiple MCP tools for comprehensive analysis
+      const analysis = await getData().getTokenInfo(address, options.chain as Chain);
 
       const result = {
         token: address,
         chain: options.chain,
         timestamp: new Date().toISOString(),
+        source: 'mcp-first',
+        symbol: analysis.symbol,
+        name: analysis.name,
         topHolders: analysis.holders.slice(0, 5).map(h => ({
           address: h.address,
           label: h.label,
           ownershipPercent: h.ownershipPercent,
           valueUsd: h.valueUsd,
-          balanceChange7d: h.balanceChange7d,
         })),
-        flows: analysis.flows.slice(0, 5).map(f => ({
-          entity: f.entity,
-          label: f.label,
-          netFlowUsd: f.netFlowUsd,
-          txCount: f.txCount,
-        })),
-        recentTrades: analysis.recentTrades.slice(0, 5).map(t => ({
-          side: t.side,
-          valueUsd: t.valueUsd,
-          trader: t.traderLabel || formatAddress(t.trader),
-          timestamp: t.timestamp,
-        })),
-        whoBoughtSold: analysis.whoBoughtSold.slice(0, 5),
+        flows: analysis.flows,
+        trades: analysis.trades,
+        pnlLeaderboard: analysis.pnlLeaderboard,
+        whoBoughtSold: analysis.whoBoughtSold,
       };
 
       console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
@@ -147,35 +138,34 @@ program
 
 program
   .command('address <addr>')
-  .description('Wallet summary: balances, related wallets')
-  .requiredOption('-c, --chain <chain>', 'Chain (ethereum, base, arbitrum, etc.)')
+  .description('Wallet summary: balances, PnL, related wallets (MCP-first)')
+  .option('-c, --chain <chain>', 'Chain (for API fallback)')
   .option('--pretty', 'Pretty print output')
   .action(async (addr: string, options) => {
     try {
-      const [balances, related] = await Promise.all([
-        getClient().getWalletBalances({ address: addr, chain: options.chain as Chain }),
-        getClient().getRelatedWallets({ address: addr, chain: options.chain as Chain }),
-      ]);
-
-      const totalValue = balances.reduce((sum, b) => sum + b.valueUsd, 0);
+      // MCP-first: uses wallet_pnl_summary + address_portfolio (comprehensive)
+      const profile = await getData().getWalletProfile(addr, options.chain as Chain | undefined);
 
       const result = {
         address: addr,
-        chain: options.chain,
         timestamp: new Date().toISOString(),
-        totalValueUsd: totalValue,
-        topHoldings: balances.slice(0, 10).map(b => ({
-          symbol: b.symbol,
-          name: b.name,
-          amount: b.amount,
-          valueUsd: b.valueUsd,
+        source: 'mcp-first',
+        totalValueUsd: profile.totalValueUsd,
+        realizedPnl: profile.realizedPnl,
+        unrealizedPnl: profile.unrealizedPnl,
+        winRate: profile.winRate,
+        topHoldings: profile.topHoldings.slice(0, 10).map(h => ({
+          symbol: h.symbol,
+          chain: h.chain,
+          amount: h.amount,
+          valueUsd: h.valueUsd,
         })),
-        relatedWallets: related.slice(0, 5).map(r => ({
+        relatedWallets: profile.relatedWallets?.slice(0, 5).map(r => ({
           address: r.address,
           label: r.label,
           relationship: r.relationship,
-          txCount: r.txCount,
         })),
+        recentActivity: profile.recentActivity,
       };
 
       console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
@@ -232,7 +222,7 @@ program
 
 program
   .command('smart-money')
-  .description('Track smart money netflow')
+  .description('Track smart money netflow (API-first: faster for bulk queries)')
   .requiredOption('--chain <chain>', 'Blockchain (ethereum, base, arbitrum, etc.)')
   .option('--direction <dir>', 'Filter: inflow, outflow, or all', 'all')
   .option('--min-value <usd>', 'Minimum USD value', parseFloat)
@@ -242,7 +232,8 @@ program
     const spinner = ora('Fetching smart money data...').start();
 
     try {
-      const data = await getClient().getSmartMoneyNetflow({
+      // API-first: faster for bulk queries
+      const data = await getData().getSmartMoneyNetflow({
         chain: options.chain as Chain,
         direction: options.direction as FlowDirection,
         minValue: options.minValue,
@@ -291,7 +282,7 @@ program
 
 program
   .command('holdings')
-  .description('Smart money holdings')
+  .description('Smart money holdings (API-first)')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--limit <n>', 'Number of results', parseInt, 20)
   .option('--json', 'Output as JSON')
@@ -299,7 +290,8 @@ program
     const spinner = ora('Fetching holdings...').start();
 
     try {
-      const data = await getClient().getSmartMoneyHoldings({
+      // API-first: faster for bulk queries
+      const data = await getData().getSmartMoneyHoldings({
         chain: options.chain as Chain,
         limit: options.limit,
       });
@@ -344,7 +336,7 @@ program
 
 program
   .command('sm-trades')
-  .description('Smart money DEX trades')
+  .description('Smart money DEX trades (API-first)')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--limit <n>', 'Number of results', parseInt, 20)
   .option('--json', 'Output as JSON')
@@ -352,7 +344,8 @@ program
     const spinner = ora('Fetching smart money trades...').start();
 
     try {
-      const data = await getClient().getSmartMoneyDexTrades({
+      // API-first: for DEX trade data
+      const data = await getData().getSmartMoneyDexTrades({
         chain: options.chain as Chain,
         limit: options.limit,
       });
@@ -398,7 +391,7 @@ program
 
 program
   .command('holders')
-  .description('Token top holders')
+  .description('Token top holders (MCP-first with API fallback)')
   .requiredOption('--token <address>', 'Token address')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--limit <n>', 'Number of results', parseInt, 10)
@@ -407,11 +400,8 @@ program
     const spinner = ora('Fetching holders...').start();
 
     try {
-      const data = await getClient().getTokenHolders({
-        chain: options.chain as Chain,
-        tokenAddress: options.token,
-        limit: options.limit,
-      });
+      // MCP-first: richer holder data
+      const data = await getData().getTokenHolders(options.token, options.chain as Chain, options.limit);
 
       spinner.stop();
 
@@ -450,7 +440,7 @@ program
 
 program
   .command('flows')
-  .description('Token flows by entity')
+  .description('Token flows by entity (MCP-first with API fallback)')
   .requiredOption('--token <address>', 'Token address')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--limit <n>', 'Number of results', parseInt, 10)
@@ -459,11 +449,8 @@ program
     const spinner = ora('Fetching flows...').start();
 
     try {
-      const data = await getClient().getTokenFlows({
-        chain: options.chain as Chain,
-        tokenAddress: options.token,
-        limit: options.limit,
-      });
+      // MCP-first: uses token_recent_flows_summary
+      const data = await getData().getTokenFlows(options.token, options.chain as Chain);
 
       spinner.stop();
 
@@ -502,19 +489,19 @@ program
 
 program
   .command('trades')
-  .description('Token DEX trades')
+  .description('Token DEX trades (MCP-first with API fallback)')
   .requiredOption('--token <address>', 'Token address')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--limit <n>', 'Number of results', parseInt, 20)
+  .option('--smart-money', 'Only show smart money trades')
   .option('--json', 'Output as JSON')
   .action(async (options) => {
     const spinner = ora('Fetching trades...').start();
 
     try {
-      const data = await getClient().getTokenDexTrades({
-        chain: options.chain as Chain,
-        tokenAddress: options.token,
-        limit: options.limit,
+      // MCP-first: uses token_dex_trades with smart money filter
+      const data = await getData().getTokenDexTrades(options.token, options.chain as Chain, {
+        onlySmartMoney: options.smartMoney,
       });
 
       spinner.stop();
@@ -559,7 +546,7 @@ program
 
 program
   .command('balances')
-  .description('Wallet token balances')
+  .description('Wallet token balances (API: structured response)')
   .requiredOption('--address <addr>', 'Wallet address')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--limit <n>', 'Number of results', parseInt, 20)
@@ -568,11 +555,8 @@ program
     const spinner = ora('Fetching balances...').start();
 
     try {
-      const data = await getClient().getWalletBalances({
-        address: options.address,
-        chain: options.chain as Chain,
-        limit: options.limit,
-      });
+      // API: more structured balance data
+      const data = await getData().getWalletBalances(options.address, options.chain as Chain);
 
       spinner.stop();
 
@@ -609,20 +593,17 @@ program
 
 program
   .command('related')
-  .description('Related wallets')
+  .description('Related wallets (MCP-first with API fallback)')
   .requiredOption('--address <addr>', 'Wallet address')
-  .requiredOption('--chain <chain>', 'Blockchain')
+  .option('--chain <chain>', 'Blockchain (optional for MCP, required for API)')
   .option('--limit <n>', 'Number of results', parseInt, 10)
   .option('--json', 'Output as JSON')
   .action(async (options) => {
     const spinner = ora('Fetching related wallets...').start();
 
     try {
-      const data = await getClient().getRelatedWallets({
-        address: options.address,
-        chain: options.chain as Chain,
-        limit: options.limit,
-      });
+      // MCP-first: address_related_addresses (more relationships)
+      const data = await getData().getRelatedWallets(options.address, options.chain as Chain | undefined);
 
       spinner.stop();
 
@@ -660,7 +641,7 @@ program
 
 program
   .command('scan')
-  .description('Scan for trading opportunities')
+  .description('Scan for trading opportunities (API: fast composite method)')
   .requiredOption('--chain <chain>', 'Blockchain')
   .option('--mode <mode>', 'Scan mode: accumulation, distribution', 'accumulation')
   .option('--limit <n>', 'Number of results', parseInt, 10)
@@ -669,7 +650,8 @@ program
     const spinner = ora(`Scanning for ${options.mode} signals...`).start();
 
     try {
-      const signals = await getClient().scanOpportunities({
+      // API: fast composite method for opportunity scanning
+      const signals = await getData().scanOpportunities({
         chain: options.chain as Chain,
         mode: options.mode as ScanMode,
         limit: options.limit,
@@ -717,7 +699,7 @@ program
   .description('List supported chains')
   .option('--json', 'Output as JSON')
   .action(async (options) => {
-    const chains = getClient().getSupportedChains();
+    const chains = getData().api.getSupportedChains();
 
     if (options.json) {
       console.log(JSON.stringify(chains, null, 2));
@@ -734,22 +716,6 @@ program
 // MCP Commands
 // =============================================================================
 
-let mcp: NansenMcp;
-
-function getMcp(): NansenMcp {
-  if (!mcp) {
-    const apiKey = process.env.NANSEN_API_KEY;
-    if (!apiKey) {
-      console.error(chalk.red('NANSEN_API_KEY not found'));
-      console.log('\nSet your API key:');
-      console.log('  export NANSEN_API_KEY=your_key_here');
-      process.exit(1);
-    }
-    mcp = new NansenMcp(apiKey);
-  }
-  return mcp;
-}
-
 const mcpCmd = program.command('mcp').description('MCP commands (AI-powered, 21 tools)');
 
 mcpCmd
@@ -761,7 +727,7 @@ mcpCmd
     const spinner = ora(`Calling MCP tool: ${options.name}...`).start();
     try {
       const params = JSON.parse(options.params);
-      const result = await getMcp().callTool(options.name as McpTool, params);
+      const result = await getData().mcp.callTool(options.name as McpTool, params);
       spinner.stop();
       console.log(JSON.stringify(result, null, 2));
     } catch (error: any) {
@@ -771,6 +737,92 @@ mcpCmd
       } else {
         console.error(chalk.red(`Error: ${error.message}`));
       }
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('search')
+  .description('Search tokens/entities/addresses (free, no credits!)')
+  .requiredOption('--query <text>', 'Search query')
+  .action(async (options) => {
+    const spinner = ora(`Searching: ${options.query}...`).start();
+    try {
+      const result = await getData().search(options.query);
+      spinner.stop();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error: any) {
+      spinner.stop();
+      console.error(chalk.red(`Error: ${error.message}`));
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('chain-rankings')
+  .description('Get chain activity rankings')
+  .action(async () => {
+    const spinner = ora('Fetching chain rankings...').start();
+    try {
+      const result = await getData().getChainRankings();
+      spinner.stop();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error: any) {
+      spinner.stop();
+      console.error(chalk.red(`Error: ${error.message}`));
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('ohlcv')
+  .description('Get token OHLCV price data')
+  .requiredOption('--token <address>', 'Token address')
+  .requiredOption('--chain <chain>', 'Blockchain')
+  .option('--interval <interval>', 'Time interval (1h, 4h, 1d)', '1h')
+  .action(async (options) => {
+    const spinner = ora('Fetching OHLCV data...').start();
+    try {
+      const result = await getData().getTokenOhlcv(options.token, options.chain as Chain, options.interval);
+      spinner.stop();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error: any) {
+      spinner.stop();
+      console.error(chalk.red(`Error: ${error.message}`));
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('counterparties')
+  .description('Get wallet counterparties')
+  .requiredOption('--address <addr>', 'Wallet address')
+  .action(async (options) => {
+    const spinner = ora('Fetching counterparties...').start();
+    try {
+      const result = await getData().getCounterparties(options.address);
+      spinner.stop();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error: any) {
+      spinner.stop();
+      console.error(chalk.red(`Error: ${error.message}`));
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('wallet-pnl')
+  .description('Get wallet PnL summary')
+  .requiredOption('--address <addr>', 'Wallet address')
+  .action(async (options) => {
+    const spinner = ora('Fetching wallet PnL...').start();
+    try {
+      const result = await getData().getWalletPnl(options.address);
+      spinner.stop();
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error: any) {
+      spinner.stop();
+      console.error(chalk.red(`Error: ${error.message}`));
       process.exit(1);
     }
   });

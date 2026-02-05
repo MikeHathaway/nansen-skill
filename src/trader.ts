@@ -200,10 +200,10 @@ export class NansenTrader {
           await this.rateLimiter.acquire();
         }
 
-        // Fetch with caching
+        // Fetch with caching via unified data layer
         const signals = await this.cache.getOrFetch(
           cacheKey,
-          () => this.agent.api.scanOpportunities({ chain, mode, limit: limit * 2 }),
+          () => this.agent.data.scanOpportunities({ chain, mode, limit: limit * 2 }),
           CACHE_TTL.SMART_MONEY
         ) as OpportunitySignal[];
 
@@ -270,7 +270,7 @@ export class NansenTrader {
 
     return this.cache.getOrFetch(
       cacheKey,
-      () => this.agent.api.getSmartMoneyNetflow({ chain, direction }),
+      () => this.agent.data.getSmartMoneyNetflow({ chain, direction }),
       CACHE_TTL.SMART_MONEY
     ) as Promise<SmartMoneyNetflow[]>;
   }
@@ -287,7 +287,7 @@ export class NansenTrader {
 
     return this.cache.getOrFetch(
       cacheKey,
-      () => this.agent.api.getSmartMoneyHoldings({ chain }),
+      () => this.agent.data.getSmartMoneyHoldings({ chain }),
       CACHE_TTL.TOKEN_SCREEN
     ) as Promise<SmartMoneyHolding[]>;
   }
@@ -311,12 +311,12 @@ export class NansenTrader {
     const [apiResult, mcpResult] = await Promise.allSettled([
       this.cache.getOrFetch(
         `token:${token}:${chain}`,
-        () => this.agent.api.getTokenAnalysis({ chain, tokenAddress: token }),
+        () => this.agent.data.api.getTokenAnalysis({ chain, tokenAddress: token }),
         CACHE_TTL.TOKEN_INFO
       ),
       this.cache.getOrFetch(
         cacheKey,
-        () => this.agent.mcp.analyzeToken(token, chain),
+        () => this.agent.data.getTokenInfo(token, chain),
         CACHE_TTL.MCP_ANALYSIS
       ),
     ]);
@@ -607,7 +607,7 @@ export class NansenTrader {
         const cacheKey = Cache.makeKey('mcp_analyze', { token: signal.token, chain: signal.chain });
         const analysis = await this.cache.getOrFetch(
           cacheKey,
-          () => this.agent.mcp.analyzeToken(signal.token, signal.chain),
+          () => this.agent.data.getTokenInfo(signal.token, signal.chain),
           CACHE_TTL.MCP_ANALYSIS,
           5
         );

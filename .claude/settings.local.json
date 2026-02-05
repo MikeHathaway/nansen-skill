@@ -14,7 +14,8 @@
       "Bash(git add:*)",
       "Bash(NANSEN_API_KEY=test node dist/index.js:*)",
       "Bash(npx ts-node:*)",
-      "Bash(npm run test:api:*)"
+      "Bash(npm run test:api:*)",
+      "Bash(timeout 20 npx vitest:*)"
     ]
   }
 }

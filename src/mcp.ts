@@ -1,18 +1,18 @@
 /**
  * Nansen MCP Client
- * Programmatic access to Nansen MCP for AI-assisted analysis
+ * Direct HTTP client for Nansen MCP (no subprocess)
  *
  * MCP Endpoint: https://mcp.nansen.ai/ra/mcp
  * Docs: https://docs.nansen.ai/mcp/overview
  */
 
-import { spawn } from 'child_process';
 import type { Chain } from './types.js';
 
 const MCP_ENDPOINT = 'https://mcp.nansen.ai/ra/mcp';
+const MCP_TIMEOUT_MS = 30000;
 
 export class NansenMcpError extends Error {
-  constructor(message: string, public details?: unknown) {
+  constructor(message: string, public code?: string, public details?: unknown) {
     super(message);
     this.name = 'NansenMcpError';
   }
@@ -75,6 +75,18 @@ export const MCP_TOOLS: Record<McpTool, { description: string; credits: number }
   transaction_lookup: { description: 'Transaction details (EVM)', credits: 1 },
 };
 
+interface McpToolResult {
+  content?: Array<{ type: string; text?: string }>;
+  isError?: boolean;
+}
+
+interface McpJsonRpcResponse {
+  jsonrpc: string;
+  id: number;
+  result?: McpToolResult;
+  error?: { code: number; message: string; data?: unknown };
+}
+
 export class NansenMcp {
   private apiKey: string;
   private mcpEndpoint: string;
@@ -84,62 +96,113 @@ export class NansenMcp {
     this.mcpEndpoint = mcpEndpoint || MCP_ENDPOINT;
   }
 
+  /**
+   * Call an MCP tool via HTTP JSON-RPC
+   */
   async callTool<T = unknown>(tool: McpTool, params: Record<string, unknown>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const args = [
-        '-y', 'mcp-remote',
-        this.mcpEndpoint,
-        '--header', `NANSEN-API-KEY:${this.apiKey}`,
-        '--allow-http',
-        '--tool', tool,
-        '--input', JSON.stringify(params),
-      ];
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
 
-      const proc = spawn('npx', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
-      proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-
-      proc.on('close', (code: number) => {
-        if (code === 0 && stdout.trim()) {
-          try {
-            resolve(JSON.parse(stdout));
-          } catch {
-            resolve(stdout.trim() as unknown as T);
-          }
-        } else {
-          reject(new NansenMcpError(`MCP tool call failed: ${stderr || 'Unknown error'}`, { code, stdout, stderr }));
-        }
+    try {
+      const response = await fetch(this.mcpEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/event-stream',
+          'NANSEN-API-KEY': this.apiKey,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'tools/call',
+          params: { name: tool, arguments: params },
+        }),
+        signal: controller.signal,
       });
 
-      proc.on('error', (err: Error) => {
-        reject(new NansenMcpError(`Failed to spawn MCP process: ${err.message}`));
-      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new NansenMcpError(
+          `MCP HTTP error: ${response.status} ${response.statusText}`,
+          `HTTP_${response.status}`,
+          { body: text }
+        );
+      }
 
-      setTimeout(() => {
-        proc.kill();
-        reject(new NansenMcpError('MCP tool call timed out'));
-      }, 30000);
-    });
+      const data: McpJsonRpcResponse = await response.json();
+
+      if (data.error) {
+        throw new NansenMcpError(
+          data.error.message,
+          `MCP_${data.error.code}`,
+          data.error.data
+        );
+      }
+
+      return this.parseToolResult<T>(data.result);
+    } catch (error: unknown) {
+      if (error instanceof NansenMcpError) throw error;
+      if ((error as Error).name === 'AbortError') {
+        throw new NansenMcpError('MCP request timed out', 'TIMEOUT');
+      }
+      throw new NansenMcpError(
+        `MCP request failed: ${(error as Error).message}`,
+        'FETCH_ERROR',
+        error
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
-  // Smart Money
+  /**
+   * Parse MCP tool result - handles both JSON and text responses
+   */
+  private parseToolResult<T>(result?: McpToolResult): T {
+    if (!result) {
+      return null as T;
+    }
+
+    if (result.isError) {
+      const errorText = result.content?.find(c => c.type === 'text')?.text || 'Unknown MCP error';
+      throw new NansenMcpError(errorText, 'TOOL_ERROR');
+    }
+
+    // Extract text content
+    const textContent = result.content?.find(c => c.type === 'text')?.text;
+    if (!textContent) {
+      return null as T;
+    }
+
+    // Try to parse as JSON first
+    try {
+      return JSON.parse(textContent) as T;
+    } catch {
+      // Return as string if not JSON
+      return textContent as T;
+    }
+  }
+
+  // ===========================================================================
+  // Smart Money Tools
+  // ===========================================================================
+
   async getSmartTraderBalances(chain: Chain) {
-    return this.callTool('smart_traders_and_funds_token_balances', { chain });
+    return this.callTool('smart_traders_and_funds_token_balances', { chains: [chain] });
   }
 
   async getSmartTraderNetflows(chain: Chain) {
-    return this.callTool('smart_traders_and_funds_netflows', { chain });
+    return this.callTool('smart_traders_and_funds_netflows', { chains: [chain] });
   }
 
   async getSolanaDcaOrders(token?: string) {
     return this.callTool('smart_traders_and_funds_dcas_solana', token ? { token } : {});
   }
 
-  // Token Analysis
+  // ===========================================================================
+  // Token Analysis Tools
+  // ===========================================================================
+
   async getTokenHolders(token: string, chain: Chain, limit = 25) {
     return this.callTool('token_current_top_holders', { token, chain, limit });
   }
@@ -159,15 +222,30 @@ export class NansenMcp {
     return this.callTool('token_pnl_leaderboard', { token, chain });
   }
 
-  async screenTokens(chain?: Chain) {
-    return this.callTool('token_discovery_screener', chain ? { chain } : {});
+  async getWhoBoughtSold(token: string, chain: Chain) {
+    return this.callTool('token_who_bought_sold', { token, chain });
   }
 
-  async getTokenOhlcv(token: string, chain: Chain) {
-    return this.callTool('token_ohlcv', { token, chain });
+  async getTokenTransfers(token: string, chain: Chain, page = 1) {
+    return this.callTool('token_transfers', { token, chain, page });
   }
 
-  // Wallet Profiler
+  async getRecentFlowsSummary(token: string, chain: Chain) {
+    return this.callTool('token_recent_flows_summary', { token, chain });
+  }
+
+  async screenTokens(chains?: Chain[]) {
+    return this.callTool('token_discovery_screener', chains ? { chains } : {});
+  }
+
+  async getTokenOhlcv(token: string, chain: Chain, interval = '1h') {
+    return this.callTool('token_ohlcv', { token, chain, interval });
+  }
+
+  // ===========================================================================
+  // Wallet Profiler Tools
+  // ===========================================================================
+
   async getWalletPortfolio(address: string) {
     return this.callTool('address_portfolio', { address });
   }
@@ -184,6 +262,14 @@ export class NansenMcp {
     return this.callTool('address_transactions', { address, page });
   }
 
+  async getAddressTransactionsForToken(address: string, token: string, chain: Chain) {
+    return this.callTool('address_transactions_for_token', { address, token, chain });
+  }
+
+  async getHistoricalBalances(address: string, chain: Chain) {
+    return this.callTool('address_historical_balances', { address, chain });
+  }
+
   async getRelatedAddresses(address: string) {
     return this.callTool('address_related_addresses', { address });
   }
@@ -192,7 +278,10 @@ export class NansenMcp {
     return this.callTool('address_counterparties', { address });
   }
 
-  // Misc
+  // ===========================================================================
+  // Misc Tools
+  // ===========================================================================
+
   async search(query: string) {
     return this.callTool('general_search', { query });
   }
@@ -205,20 +294,50 @@ export class NansenMcp {
     return this.callTool('transaction_lookup', { tx_hash: txHash, chain });
   }
 
-  // Comprehensive Analysis
+  // ===========================================================================
+  // Comprehensive Analysis (multiple tool calls)
+  // ===========================================================================
+
   async analyzeToken(token: string, chain: Chain): Promise<{
     holders?: unknown;
     trades?: unknown;
     flows?: unknown;
     pnl?: unknown;
+    whoBoughtSold?: unknown;
     errors: string[];
   }> {
-    const result: { holders?: unknown; trades?: unknown; flows?: unknown; pnl?: unknown; errors: string[] } = { errors: [] };
+    const result: {
+      holders?: unknown;
+      trades?: unknown;
+      flows?: unknown;
+      pnl?: unknown;
+      whoBoughtSold?: unknown;
+      errors: string[];
+    } = { errors: [] };
 
-    try { result.holders = await this.getTokenHolders(token, chain); } catch (e) { result.errors.push(`holders: ${(e as Error).message}`); }
-    try { result.trades = await this.getTokenDexTrades(token, chain, true); } catch (e) { result.errors.push(`trades: ${(e as Error).message}`); }
-    try { result.flows = await this.getTokenFlows(token, chain); } catch (e) { result.errors.push(`flows: ${(e as Error).message}`); }
-    try { result.pnl = await this.getTokenPnlLeaderboard(token, chain); } catch (e) { result.errors.push(`pnl: ${(e as Error).message}`); }
+    // Run all calls in parallel for speed
+    const [holdersRes, tradesRes, flowsRes, pnlRes, whoBoughtSoldRes] = await Promise.allSettled([
+      this.getTokenHolders(token, chain),
+      this.getTokenDexTrades(token, chain, true),
+      this.getRecentFlowsSummary(token, chain),
+      this.getTokenPnlLeaderboard(token, chain),
+      this.getWhoBoughtSold(token, chain),
+    ]);
+
+    if (holdersRes.status === 'fulfilled') result.holders = holdersRes.value;
+    else result.errors.push(`holders: ${holdersRes.reason?.message || 'failed'}`);
+
+    if (tradesRes.status === 'fulfilled') result.trades = tradesRes.value;
+    else result.errors.push(`trades: ${tradesRes.reason?.message || 'failed'}`);
+
+    if (flowsRes.status === 'fulfilled') result.flows = flowsRes.value;
+    else result.errors.push(`flows: ${flowsRes.reason?.message || 'failed'}`);
+
+    if (pnlRes.status === 'fulfilled') result.pnl = pnlRes.value;
+    else result.errors.push(`pnl: ${pnlRes.reason?.message || 'failed'}`);
+
+    if (whoBoughtSoldRes.status === 'fulfilled') result.whoBoughtSold = whoBoughtSoldRes.value;
+    else result.errors.push(`whoBoughtSold: ${whoBoughtSoldRes.reason?.message || 'failed'}`);
 
     return result;
   }
@@ -228,17 +347,48 @@ export class NansenMcp {
     pnl?: unknown;
     transactions?: unknown;
     related?: unknown;
+    counterparties?: unknown;
     errors: string[];
   }> {
-    const result: { portfolio?: unknown; pnl?: unknown; transactions?: unknown; related?: unknown; errors: string[] } = { errors: [] };
+    const result: {
+      portfolio?: unknown;
+      pnl?: unknown;
+      transactions?: unknown;
+      related?: unknown;
+      counterparties?: unknown;
+      errors: string[];
+    } = { errors: [] };
 
-    try { result.portfolio = await this.getWalletPortfolio(address); } catch (e) { result.errors.push(`portfolio: ${(e as Error).message}`); }
-    try { result.pnl = await this.getWalletPnlSummary(address); } catch (e) { result.errors.push(`pnl: ${(e as Error).message}`); }
-    try { result.transactions = await this.getAddressTransactions(address); } catch (e) { result.errors.push(`transactions: ${(e as Error).message}`); }
-    try { result.related = await this.getRelatedAddresses(address); } catch (e) { result.errors.push(`related: ${(e as Error).message}`); }
+    // Run all calls in parallel
+    const [portfolioRes, pnlRes, txRes, relatedRes, counterpartiesRes] = await Promise.allSettled([
+      this.getWalletPortfolio(address),
+      this.getWalletPnlSummary(address),
+      this.getAddressTransactions(address),
+      this.getRelatedAddresses(address),
+      this.getCounterparties(address),
+    ]);
+
+    if (portfolioRes.status === 'fulfilled') result.portfolio = portfolioRes.value;
+    else result.errors.push(`portfolio: ${portfolioRes.reason?.message || 'failed'}`);
+
+    if (pnlRes.status === 'fulfilled') result.pnl = pnlRes.value;
+    else result.errors.push(`pnl: ${pnlRes.reason?.message || 'failed'}`);
+
+    if (txRes.status === 'fulfilled') result.transactions = txRes.value;
+    else result.errors.push(`transactions: ${txRes.reason?.message || 'failed'}`);
+
+    if (relatedRes.status === 'fulfilled') result.related = relatedRes.value;
+    else result.errors.push(`related: ${relatedRes.reason?.message || 'failed'}`);
+
+    if (counterpartiesRes.status === 'fulfilled') result.counterparties = counterpartiesRes.value;
+    else result.errors.push(`counterparties: ${counterpartiesRes.reason?.message || 'failed'}`);
 
     return result;
   }
+
+  // ===========================================================================
+  // Utility Methods
+  // ===========================================================================
 
   getToolCredits(tool: McpTool): number {
     return MCP_TOOLS[tool]?.credits ?? 1;
