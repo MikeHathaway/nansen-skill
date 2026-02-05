@@ -181,6 +181,12 @@ export class NansenAgent {
   async analyzeWallet(address: string) { return this.data.getWalletProfile(address); }
   async search(query: string) { return this.data.search(query); }
   async screenTokens(chains: Chain[]) { return this.data.screenTokens(chains); }
+
+  // High-level market overview (single call, parallel fetch)
+  async getMarketOverview(chains?: Chain[]) { return this.data.getMarketOverview(chains); }
+
+  // Polymarket-focused overview (Polygon + prediction markets)
+  async getPolymarketOverview(analyzeContracts?: boolean) { return this.data.getPolymarketOverview(analyzeContracts); }
 }
 
 export function createAgent(apiKey?: string): NansenAgent {

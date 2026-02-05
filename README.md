@@ -1,8 +1,14 @@
 # Nansen Trading Skill
 
-Trading-focused Nansen integration for autonomous agents. Provides smart money tracking, token screening, and opportunity detection with built-in caching, rate limiting, and signal persistence.
+Trading-focused Nansen integration for autonomous agents. **MCP-first architecture** with API fallback for comprehensive smart money tracking, token screening, and opportunity detection.
 
 ## Features
+
+- **NansenData**: Unified data layer (MCP-first with API fallback)
+  - `getMarketOverview()` - Single call for market-wide view
+  - `getPolymarketOverview()` - Polymarket/Polygon focused data
+  - Smart routing between MCP (21 tools) and Direct API (10 endpoints)
+  - Parallel fetching for efficiency
 
 - **NansenTrader**: High-level trading intelligence layer
   - Caching to save API credits
@@ -10,16 +16,15 @@ Trading-focused Nansen integration for autonomous agents. Provides smart money t
   - Signal logging with performance tracking
   - Risk filtering and recommendations
 
-- **Direct API**: Fast access to Nansen endpoints
-  - Smart money netflow
-  - Token screener
-  - DEX trades
-  - Wallet profiling
+- **Direct API**: Fast access to Nansen endpoints (10 working)
+  - Smart money: netflow, holdings, dex-trades
+  - Token God Mode: holders, flows, dex-trades, transfers, who-bought-sold
+  - Wallet Profiler: current-balance, related-wallets
 
-- **MCP**: 21 AI-powered analysis tools
-  - Token analysis (holders, trades, flows, PnL)
-  - Wallet profiling (portfolio, transactions, counterparties)
-  - Search and discovery
+- **MCP**: 21 AI-powered analysis tools (via HTTP, no subprocess)
+  - Token analysis (holders, trades, flows, PnL, screener, OHLCV)
+  - Wallet profiling (portfolio, PnL, transactions, counterparties)
+  - Search (free!), chain rankings, transaction lookup
 
 ## Installation
 
@@ -36,25 +41,36 @@ Get your API key at: https://app.nansen.ai/api
 ### CLI (JSON-first)
 
 ```bash
-# Streamlined commands (recommended)
+# Market overview (single call, parallel fetch)
+nansen market                             # Overview: base, ethereum, arbitrum, polygon
+nansen market -c base,solana --pretty     # Custom chains
+nansen polymarket                         # Polymarket/Polygon focused
+nansen polymarket --analyze-contracts     # Include contract analysis
+
+# Token commands (MCP-first)
 nansen hot base                           # Top tokens by smart money on Base
 nansen hot ethereum -l 20                 # Top 20 on Ethereum
-nansen token 0x... -c base                # Token summary
-nansen address 0x...                      # Wallet summary
-nansen alerts                             # Recent signals
+nansen token 0x... -c base                # Token summary (holders, flows, trades)
+nansen holders --token 0x... --chain base # Token holders
+
+# Wallet commands (MCP-first)
+nansen address 0x...                      # Wallet summary with PnL
+nansen balances --address 0x... --chain ethereum
+
+# Smart money (API-first, faster for bulk)
+nansen smart-money --chain base --json
+nansen holdings --chain base
+nansen sm-trades --chain base
+
+# MCP tools (21 available)
+nansen mcp search --query "AERO base"     # Free search
+nansen mcp wallet-pnl --address 0x...     # Wallet PnL summary
+nansen mcp ohlcv --token 0x... --chain base
+nansen mcp tools                          # List all tools
 
 # Trading intelligence
-nansen trader scan --chains ethereum,base
 nansen trader quick --chain base
-nansen trader monitor --chains base --interval 30
-
-# Direct API (verbose)
-nansen smart-money --chain ethereum --json
-nansen screen --chain base --smart-money-only --json
-
-# MCP tools
-nansen mcp analyze-token --token 0x... --chain base
-nansen mcp tools
+nansen alerts                             # Recent signals
 ```
 
 ### Example Output
@@ -79,17 +95,33 @@ $ nansen alerts --min-score 5
 ### Programmatic
 
 ```typescript
-import { NansenTrader, createTrader } from 'nansen-api-skill';
+// Unified data layer (recommended)
+import { createData } from 'nansen-api-skill';
+
+const data = createData();
+
+// Single call for market overview (parallel fetch)
+const market = await data.getMarketOverview(['base', 'ethereum', 'polygon']);
+console.log(`Hot tokens: ${market.hotTokens.length}`);
+console.log(`Top accumulating: ${market.smartMoneyActivity.topAccumulating.map(t => t.symbol)}`);
+
+// Polymarket-focused overview
+const polymarket = await data.getPolymarketOverview(true); // true = analyze contracts
+console.log(`Polygon activity: ${polymarket.polygonActivity.hotTokens.length} tokens`);
+
+// Individual queries (MCP-first with API fallback)
+const tokenInfo = await data.getTokenInfo('0x...', 'base');
+const walletProfile = await data.getWalletProfile('0x...');
+const searchResults = await data.search('AERO base'); // Free!
+
+// Trading intelligence layer
+import { createTrader } from 'nansen-api-skill';
 
 const trader = createTrader({
   rateLimitPreset: 'standard',
-  riskConfig: {
-    minScore: 2.5,
-    minSmartMoneyBuyers: 5,
-  },
+  riskConfig: { minScore: 2.5, minSmartMoneyBuyers: 5 },
 });
 
-// Scan for opportunities
 const signals = await trader.scan({
   chains: ['ethereum', 'base'],
   modes: ['accumulation'],
@@ -98,22 +130,15 @@ const signals = await trader.scan({
 
 for (const signal of signals) {
   console.log(`${signal.recommendation}: ${signal.symbol}`);
-  console.log(`  Confidence: ${signal.confidence}`);
-
   if (signal.suggestedAction) {
     console.log(`  Action: ${signal.suggestedAction.action}`);
-    console.log(`  Urgency: ${signal.suggestedAction.urgency}`);
   }
 }
 
 // Track performance
 trader.markActed(signal.id, 'buy');
 trader.recordOutcome(signal.id, { entryPrice: 1.0, exitPrice: 1.5 });
-
-// View stats
-const stats = trader.getStats();
-console.log(`Win rate: ${stats.signals.winRate}`);
-console.log(`Credits saved: ${stats.cache.creditsSaved}`);
+console.log(`Win rate: ${trader.getStats().signals.winRate}`);
 ```
 
 ## Architecture
@@ -128,18 +153,39 @@ console.log(`Credits saved: ${stats.cache.creditsSaved}`);
 │              ┌─────────┴─────────┐                     │
 │              │    NansenAgent    │                     │
 │              └─────────┬─────────┘                     │
+│                        │                                │
+│              ┌─────────┴─────────┐                     │
+│              │    NansenData     │  ← Unified Layer    │
+│              │  (MCP-first)      │                     │
+│              └─────────┬─────────┘                     │
 │         ┌──────────────┴──────────────┐                │
 │         │                             │                │
 │  ┌──────┴──────┐            ┌────────┴────────┐       │
 │  │ NansenClient│            │    NansenMcp    │       │
-│  │ (Direct API)│            │   (21 tools)    │       │
+│  │ (10 endpoints)           │  (21 tools)     │       │
+│  │  API-first  │            │  MCP-first      │       │
 │  └─────────────┘            └─────────────────┘       │
 └─────────────────────────────────────────────────────────┘
                            │
-                    ┌──────┴──────┐
-                    │  Nansen API │
-                    └─────────────┘
+           ┌───────────────┴───────────────┐
+           │                               │
+    ┌──────┴──────┐              ┌────────┴────────┐
+    │ Direct API  │              │   MCP HTTP      │
+    │ api.nansen  │              │  mcp.nansen     │
+    └─────────────┘              └─────────────────┘
 ```
+
+### Data Routing Strategy
+
+| Request Type | Primary | Fallback | Notes |
+|--------------|---------|----------|-------|
+| Market overview | Both (parallel) | - | `getMarketOverview()` |
+| Token screening | MCP | None | `token_discovery_screener` |
+| Token holders | MCP | API | Richer data from MCP |
+| Token trades | MCP | API | Smart money filter |
+| Wallet profile | MCP | API | Includes PnL |
+| Smart money netflow | API | MCP | Faster for bulk |
+| Search | MCP | None | Free, no credits! |
 
 ## Signal Output
 
@@ -172,14 +218,41 @@ Each trading signal includes:
 
 ## CLI Commands
 
-### Streamlined (JSON-first)
+### Market Overview (Recommended Entry Points)
+
+| Command | Description |
+|---------|-------------|
+| `market` | High-level market overview (parallel fetch) |
+| `market -c base,solana` | Custom chains |
+| `polymarket` | Polymarket/Polygon focused overview |
+| `polymarket --analyze-contracts` | Include CTF contract analysis |
+
+### Token Commands (MCP-first)
 
 | Command | Description |
 |---------|-------------|
 | `hot <chain>` | Top tokens by smart money flow |
-| `token <address> -c <chain>` | Token summary: flows, holders, notable wallets |
-| `address <addr>` | Wallet summary: labels, behavior, holdings |
-| `alerts` | Recent trading signals from log |
+| `token <address> -c <chain>` | Token summary: flows, holders, PnL |
+| `holders --token 0x... --chain base` | Token top holders |
+| `flows --token 0x... --chain base` | Token flows by entity |
+| `trades --token 0x... --chain base` | Token DEX trades |
+
+### Wallet Commands (MCP-first)
+
+| Command | Description |
+|---------|-------------|
+| `address <addr>` | Wallet summary with PnL |
+| `balances --address 0x... --chain eth` | Token balances |
+| `related --address 0x...` | Related wallets |
+
+### Smart Money (API-first)
+
+| Command | Description |
+|---------|-------------|
+| `smart-money --chain base` | Smart money netflow |
+| `holdings --chain base` | Smart money holdings |
+| `sm-trades --chain base` | Smart money DEX trades |
+| `scan --chain base` | Opportunity scanner |
 
 ### Trader (Intelligence Layer)
 
@@ -207,14 +280,16 @@ Each trading signal includes:
 | `token` | Token analysis |
 | `scan` | Opportunity scanner |
 
-### MCP
+### MCP Commands
 
 | Command | Description |
 |---------|-------------|
-| `mcp tool` | Call any MCP tool directly |
-| `mcp analyze-token` | Comprehensive token analysis |
-| `mcp analyze-wallet` | Comprehensive wallet analysis |
-| `mcp search` | Search (free) |
+| `mcp search --query "..."` | Search tokens/entities (free!) |
+| `mcp wallet-pnl --address 0x...` | Wallet PnL summary |
+| `mcp ohlcv --token 0x... --chain base` | Token OHLCV data |
+| `mcp counterparties --address 0x...` | Wallet counterparties |
+| `mcp chain-rankings` | Chain activity rankings |
+| `mcp tool --name <tool> --params '{}'` | Call any tool directly |
 | `mcp tools` | List all 21 tools |
 
 ## Testing
@@ -223,7 +298,12 @@ Each trading signal includes:
 npm test
 ```
 
-64 tests covering cache, rate limiter, signal log, and API client.
+85 tests covering:
+- `data.test.ts` - Unified data layer, market overview, Polymarket
+- `api.test.ts` - Direct API client
+- `cache.test.ts` - Caching layer
+- `rate-limiter.test.ts` - Rate limiting
+- `signal-log.test.ts` - Signal persistence
 
 ## Integration
 

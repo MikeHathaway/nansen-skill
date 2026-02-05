@@ -65,6 +65,37 @@ program
 // =============================================================================
 
 program
+  .command('market')
+  .description('High-level market overview (single call, parallel fetch)')
+  .option('-c, --chains <chains>', 'Comma-separated chains', 'base,ethereum,arbitrum,polygon')
+  .option('--pretty', 'Pretty print output')
+  .action(async (options) => {
+    try {
+      const chains = options.chains.split(',').map((c: string) => c.trim()) as Chain[];
+      const overview = await getData().getMarketOverview(chains);
+      console.log(JSON.stringify(overview, null, options.pretty ? 2 : 0));
+    } catch (error: any) {
+      console.log(JSON.stringify({ error: error.message }));
+      process.exit(1);
+    }
+  });
+
+program
+  .command('polymarket')
+  .description('Polymarket-focused overview (Polygon activity + prediction markets)')
+  .option('--analyze-contracts', 'Also analyze known Polymarket contracts (extra API calls)')
+  .option('--pretty', 'Pretty print output')
+  .action(async (options) => {
+    try {
+      const overview = await getData().getPolymarketOverview(options.analyzeContracts);
+      console.log(JSON.stringify(overview, null, options.pretty ? 2 : 0));
+    } catch (error: any) {
+      console.log(JSON.stringify({ error: error.message }));
+      process.exit(1);
+    }
+  });
+
+program
   .command('hot <chain>')
   .description('Top tokens by smart money flow (MCP: token_discovery_screener)')
   .option('-l, --limit <n>', 'Number of results', parseInt, 10)

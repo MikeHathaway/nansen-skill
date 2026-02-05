@@ -90,6 +90,38 @@ export interface TokenSummary {
   whoBoughtSold?: unknown;
 }
 
+export interface MarketOverview {
+  timestamp: string;
+  chains: Chain[];
+  hotTokens: ScreenerToken[];
+  smartMoneyActivity: {
+    netflows: SmartMoneyNetflow[];
+    topAccumulating: SmartMoneyNetflow[];
+    topDistributing: SmartMoneyNetflow[];
+  };
+  chainRankings?: unknown;
+  errors: string[];
+}
+
+export interface PolymarketOverview {
+  timestamp: string;
+  searchResults?: unknown;
+  polygonActivity: {
+    hotTokens: ScreenerToken[];
+    smartMoneyNetflows: SmartMoneyNetflow[];
+    topAccumulating: SmartMoneyNetflow[];
+  };
+  knownContracts: {
+    ctfExchange: string;
+    conditionalTokens: string;
+  };
+  contractAnalysis?: {
+    ctfExchangeHolders?: unknown;
+    ctfExchangeFlows?: unknown;
+  };
+  errors: string[];
+}
+
 export class NansenData {
   public readonly mcp: NansenMcp;
   public readonly api: NansenClient;
@@ -124,6 +156,141 @@ export class NansenData {
       // No API fallback - screener is MCP-only
       throw error;
     }
+  }
+
+  /**
+   * Get high-level market overview in a single call
+   * Fetches hot tokens, smart money activity, and chain rankings in parallel
+   * This is the recommended entry point for market scanning
+   */
+  async getMarketOverview(chains: Chain[] = ['base', 'ethereum', 'arbitrum', 'polygon']): Promise<MarketOverview> {
+    const errors: string[] = [];
+
+    // Parallel fetch: MCP screener + API smart money + MCP chain rankings
+    const [screenerResult, netflowResults, chainRankings] = await Promise.allSettled([
+      this.mcp.screenTokens(chains),
+      Promise.all(chains.map(chain =>
+        this.api.getSmartMoneyNetflow({ chain, limit: 20 }).catch(e => {
+          errors.push(`netflow/${chain}: ${e.message}`);
+          return [];
+        })
+      )),
+      this.mcp.getChainRankings().catch(e => {
+        errors.push(`chainRankings: ${e.message}`);
+        return null;
+      }),
+    ]);
+
+    // Process screener results
+    let hotTokens: ScreenerToken[] = [];
+    if (screenerResult.status === 'fulfilled') {
+      hotTokens = this.normalizeScreenerResult(screenerResult.value, chains[0]);
+    } else {
+      errors.push(`screener: ${screenerResult.reason?.message || 'failed'}`);
+    }
+
+    // Process netflow results
+    let allNetflows: SmartMoneyNetflow[] = [];
+    if (netflowResults.status === 'fulfilled') {
+      allNetflows = netflowResults.value.flat();
+    }
+
+    // Sort and categorize netflows
+    const sorted = [...allNetflows].sort((a, b) => Math.abs(b.netflowUsd) - Math.abs(a.netflowUsd));
+    const topAccumulating = sorted.filter(n => n.netflow > 0).slice(0, 10);
+    const topDistributing = sorted.filter(n => n.netflow < 0).slice(0, 10);
+
+    return {
+      timestamp: new Date().toISOString(),
+      chains,
+      hotTokens: hotTokens.slice(0, 20),
+      smartMoneyActivity: {
+        netflows: sorted.slice(0, 30),
+        topAccumulating,
+        topDistributing,
+      },
+      chainRankings: chainRankings.status === 'fulfilled' ? chainRankings.value : null,
+      errors,
+    };
+  }
+
+  /**
+   * Get Polymarket-focused overview
+   * Polymarket runs on Polygon using conditional tokens (CTF)
+   * This aggregates Polygon activity + searches for Polymarket-related data
+   */
+  async getPolymarketOverview(analyzeContracts = false): Promise<PolymarketOverview> {
+    const errors: string[] = [];
+
+    // Known Polymarket contracts on Polygon
+    const POLYMARKET_CONTRACTS = {
+      ctfExchange: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E',
+      conditionalTokens: '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045',
+    };
+
+    // Parallel fetch: search + polygon screener + polygon netflows
+    const [searchResult, screenerResult, netflowResult] = await Promise.allSettled([
+      this.mcp.search('polymarket prediction market polygon').catch(e => {
+        errors.push(`search: ${e.message}`);
+        return null;
+      }),
+      this.mcp.screenTokens(['polygon']).catch(e => {
+        errors.push(`screener: ${e.message}`);
+        return [];
+      }),
+      this.api.getSmartMoneyNetflow({ chain: 'polygon', limit: 30 }).catch(e => {
+        errors.push(`netflow: ${e.message}`);
+        return [];
+      }),
+    ]);
+
+    // Process results
+    const searchResults = searchResult.status === 'fulfilled' ? searchResult.value : null;
+
+    let hotTokens: ScreenerToken[] = [];
+    if (screenerResult.status === 'fulfilled' && screenerResult.value) {
+      hotTokens = this.normalizeScreenerResult(screenerResult.value, 'polygon');
+    }
+
+    let netflows: SmartMoneyNetflow[] = [];
+    if (netflowResult.status === 'fulfilled') {
+      netflows = netflowResult.value;
+    }
+
+    const topAccumulating = netflows.filter(n => n.netflow > 0).slice(0, 10);
+
+    // Optionally analyze known contracts
+    let contractAnalysis: PolymarketOverview['contractAnalysis'];
+    if (analyzeContracts) {
+      const [holdersResult, flowsResult] = await Promise.allSettled([
+        this.mcp.getTokenHolders(POLYMARKET_CONTRACTS.ctfExchange, 'polygon', 25).catch(e => {
+          errors.push(`ctfHolders: ${e.message}`);
+          return null;
+        }),
+        this.mcp.getRecentFlowsSummary(POLYMARKET_CONTRACTS.ctfExchange, 'polygon').catch(e => {
+          errors.push(`ctfFlows: ${e.message}`);
+          return null;
+        }),
+      ]);
+
+      contractAnalysis = {
+        ctfExchangeHolders: holdersResult.status === 'fulfilled' ? holdersResult.value : null,
+        ctfExchangeFlows: flowsResult.status === 'fulfilled' ? flowsResult.value : null,
+      };
+    }
+
+    return {
+      timestamp: new Date().toISOString(),
+      searchResults,
+      polygonActivity: {
+        hotTokens: hotTokens.slice(0, 15),
+        smartMoneyNetflows: netflows,
+        topAccumulating,
+      },
+      knownContracts: POLYMARKET_CONTRACTS,
+      contractAnalysis,
+      errors,
+    };
   }
 
   /**
