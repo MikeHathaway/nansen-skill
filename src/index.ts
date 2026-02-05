@@ -4,6 +4,9 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import Table from 'cli-table3';
 import ora from 'ora';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { NansenData, createData } from './data.js';
 import { NansenApiError } from './api.js';
 import { NansenMcpError, MCP_TOOLS, type McpTool } from './mcp.js';
@@ -64,6 +67,19 @@ program
 // Streamlined Commands (JSON-first)
 // =============================================================================
 
+function resolveOutPath(p: string): string {
+  const expanded = p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p;
+  return path.isAbsolute(expanded) ? expanded : path.resolve(process.cwd(), expanded);
+}
+
+function writeAtomic(filePath: string, content: string): void {
+  const outPath = resolveOutPath(filePath);
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  const tmp = `${outPath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, content, 'utf-8');
+  fs.renameSync(tmp, outPath);
+}
+
 program
   .command('market')
   .description('High-level market overview (single call, parallel fetch)')
@@ -71,6 +87,9 @@ program
   .option('-k, --top-ohlcv <n>', 'Fetch OHLCV for top N tokens (1 credit each, max 10)', parseInt, 0)
   .option('--interval <interval>', 'OHLCV interval (1h, 4h, 1d)', '1h')
   .option('--pretty', 'Pretty print output')
+  .option('--json', 'Machine JSON output (no whitespace). Overrides --pretty.')
+  .option('--out <path>', 'Write output JSON to a file (atomic). Also prints to stdout unless --quiet.')
+  .option('--quiet', 'If used with --out, suppress stdout')
   .action(async (options) => {
     try {
       const chains = options.chains.split(',').map((c: string) => c.trim()) as Chain[];
@@ -79,9 +98,27 @@ program
         topOhlcvCount: options.topOhlcv,
         ohlcvInterval: options.interval,
       });
-      console.log(JSON.stringify(overview, null, options.pretty ? 2 : 0));
+
+      const machine = Boolean(options.json);
+      const indent = machine ? 0 : (options.pretty ? 2 : 0);
+      const payload = JSON.stringify(overview, null, indent);
+
+      if (options.out) {
+        writeAtomic(options.out, payload + (machine ? '' : '\n'));
+        if (!options.quiet) {
+          console.log(payload);
+        }
+        return;
+      }
+
+      console.log(payload);
     } catch (error: any) {
-      console.log(JSON.stringify({ error: error.message }));
+      const err = { error: error.message };
+      const payload = JSON.stringify(err, null, options?.pretty ? 2 : 0);
+      if (options?.out) {
+        try { writeAtomic(options.out, payload + '\n'); } catch {}
+      }
+      console.log(payload);
       process.exit(1);
     }
   });
